@@ -1,0 +1,52 @@
+# VCBench, one-shot batch ideas -> policies (no iteration): 9 labelled batches -> 45 ideas -> merged to 20 ->
+# 2 policies each = 40, all scored by Jev on every public row, one selection. Rest as configs/vcbench.yaml.
+data:
+  path: data/vcbench_final_public.csv
+  test_path: data/vcbench_final_private.csv
+  text_col: anonymised_prose
+  target_col: success
+  positive_label: 1
+  task_description: >-
+    Predict whether a startup founder will be successful, meaning their company raised over $500M
+    or exited or IPO'd at over $500M. Each text is an anonymised founder profile: the startup's industry,
+    the founder's education (degree, field, university QS rank) and professional experience
+    (roles, company sizes, industries, durations). Roughly 9% of founders are successes.
+  max_dev_rows: 4500
+  max_test_rows: 4500
+  explore_rows: 1000
+  seed: 42
+
+brain:
+  model: deepseek-chat
+  temperature: 0.9
+  idea_source: batches            # ideas read off labelled batches of explore rows
+  n_batches: 9                    # each of the 90 explore positives appears in exactly one batch
+  pos_per_batch: 10
+  neg_per_batch: 30
+  ideas_per_batch: 5              # 9 x 5 = 45 raw ideas
+  ideas_per_iter: 20              # merged into 20 distinct ideas
+  policies_per_idea: 2            # -> 40 policies
+  n_examples: 14
+
+jev:
+  model: jev-latest
+  concurrency: 24
+  questions_per_request: 10
+  policy_template: >-
+    Investor heuristic (guidance, not a strict rule): {policy}
+    Considering this heuristic along with the founder's full profile, will this founder be successful?
+
+search:
+  mode: oneshot
+  max_policies: 40
+  max_features: 15
+
+eval:
+  base: none
+  metric: roc_auc
+  folds: 5
+  repeats: 2
+  size_penalty: 0.002
+  redundancy_penalty: 0.005
+  min_gain: 0.001
+  beta: 0.5

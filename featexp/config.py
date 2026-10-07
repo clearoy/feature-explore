@@ -32,7 +32,14 @@ class BrainConfig:
     base_url: str = "https://api.deepseek.com"
     temperature: float = 0.9
     max_tokens: int = 8000
-    ideas_per_iter: int = 5            # step 1: new dimensions per iteration
+    ideas_per_iter: int = 5            # step 1: new dimensions per iteration (batches: ideas kept after merging)
+    idea_source: str = "examples"      # examples: ideas from the context (examples, hints, history)
+                                       # batches: ideas read off labelled batches of explore rows, then merged
+    n_batches: int = 9                 # batches: every positive explore row appears in exactly one batch
+    pos_per_batch: int = 10
+    neg_per_batch: int = 30
+    ideas_per_batch: int = 5
+    batch_chars: int = 1500            # each profile is truncated to this length inside a batch
     policies_per_idea: int = 3         # step 2: heuristics written per idea
     n_examples: int = 14               # explore texts shown per iteration (half residual, half random)
     example_chars: int = 700
@@ -55,6 +62,9 @@ class JevConfig:
 
 @dataclass
 class SearchConfig:
+    mode: str = "iterative"            # iterative: rounds guided by the current model's errors
+                                       # oneshot: one round of ideas -> policies, all scored, then selection
+    max_policies: int = 40             # oneshot: cap on the number of policies scored
     iterations: int = 12
     patience: int = 4                  # stop after this many iterations without objective gain
     promote_per_iter: int = 5          # policies fully extracted per iteration (main Jev cost)

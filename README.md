@@ -36,12 +36,23 @@ Founder success prediction: 4,500 public rows for discovery and 4,500 private ro
 | Original: policies scored on their own, TF-IDF C = 4 | 75.0 ± 0.2 | 31.0 ± 0.7 | 34.3 ± 1.2 | |
 | **+ TF-IDF C tuned by CV (C = 1)** | **75.1 ± 0.2** | **31.6 ± 0.6** | **34.9 ± 0.8** | kept, now the default |
 | + policies scored on top of TF-IDF during selection (`eval.base: tfidf`) | 74.8 ± 0.3 | 30.8 ± 0.5 | 33.5 ± 1.1 | worse; optional, off by default |
+| One-shot from labelled batches instead of iterating (`configs/vcbench_batch_ideas.yaml`) | 75.1 ± 0.8 | 31.0 ± 1.2 | 33.9 ± 1.6 | same mean at ~40% of the Jev cost, but much less stable |
 
 Scoring policies on top of TF-IDF matches how they are used in the end, but it did worse:
 - Each policy's gain shrinks to a few thousandths of AUC, the same size as cross-validation noise, so selection starts picking noise.
 - It also underrates the policies whose holistic judgement looks redundant with TF-IDF on the training rows, which are exactly the ones that help on the holdout.
 
 The row with tuned C reuses the three original searches and refits only the final models (the Jev answers were cached). The default configuration produces that row.
+
+The one-shot variant skips the iteration:
+1. Split the explore rows into 9 labelled batches (10 successes and 30 failures each; every success appears in exactly one batch).
+2. DeepSeek proposes 5 ideas per batch, then merges the 45 into 20.
+3. It writes 2 policies per idea, giving 40.
+4. All 40 are scored and selection runs once.
+
+It costs about 22k Jev requests per run versus 35k–65k for the iterative search, and its mean is the same. The seeds scatter widely, though: the best single run so far (stack AUC 76.1, AP 32.7) and a run that lands below TF-IDF alone both came from this variant.
+
+`report/index.html` shows every group above. Click a run to see its policies. Regenerate it with `scripts/make_report.py`; the command is in its docstring.
 
 ## Quick start
 
@@ -65,6 +76,7 @@ For VCBench, put `vcbench_final_public.csv` and `vcbench_final_private.csv` in `
 ```bash
 scripts/run_vcbench.sh                          # one run, seed from the config (42)
 scripts/run_vcbench.sh --seed 1 --concurrency 12
+CONFIG=configs/vcbench_batch_ideas.yaml scripts/run_vcbench.sh --seed 1   # one-shot variant
 .venv/bin/python scripts/summarize.py runs/vcbench_seed*    # mean ± sd over finished runs
 ```
 
@@ -143,6 +155,8 @@ Jev answers are cached in `.cache/jev.sqlite`, keyed by (policy, text, Jev versi
 | `search.max_selected_corr` | 0.9 | candidates correlating more than this with a selected policy are dropped at screening |
 | `data.explore_rows` | 1000 | rows only the brain sees; they are never scored, which prevents leakage |
 | `data.seed` / `--seed` | 42 | explore/select split, screening sample, CV folds |
+| `search.mode` | iterative | `oneshot`: one round of ideas → policies, everything scored, one selection |
+| `brain.idea_source` | examples | `batches`: ideas read off labelled batches of explore rows, then merged |
 | `eval.base` | none | `tfidf` scores policies on top of TF-IDF during selection (did worse, see above) |
 | `eval.tfidf_Cs` | 0.5 … 32 | candidate regularization strengths for the TF-IDF model, chosen by CV AUC |
 | `jev.model` | jev-latest | an alias is pinned to the concrete version on first use; pass a full version to fix it |
@@ -165,14 +179,18 @@ featexp/
   jev.py        Policy; batched Jev scoring + version pinning + SQLite cache + retry pass + mock
   brain.py      the two DeepSeek prompts (ideas, policies) + mock
   evaluator.py  repeated K-fold CV, objective J, forward/backward selection
-  search.py     the iteration loop: ideas → policies → screen → promote → select
+  search.py     the iteration loop (ideas → policies → screen → promote → select) and the one-shot mode
   textmodel.py  the TF-IDF model, C tuning, out-of-fold predictions
   final.py      final models (TF-IDF, policies, average, stack), holdout evaluation, report
   cli.py        run / predict / check / demo-data
 configs/
-  vcbench.yaml  the best VCBench configuration
-  demo.yaml     offline smoke test
+  vcbench.yaml              the best VCBench configuration (iterative)
+  vcbench_batch_ideas.yaml  one-shot: ideas from labelled batches, 40 policies
+  demo.yaml                 offline smoke test
 scripts/
   run_vcbench.sh   one full VCBench run (accepts --seed, --concurrency)
   summarize.py     holdout results of several runs, with mean ± sd
+  make_report.py   builds report/index.html from finished runs
+report/
+  index.html       pipeline overview and every experiment; click a run to see its policies
 ```

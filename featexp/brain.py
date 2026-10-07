@@ -49,6 +49,50 @@ Good heuristics are:
 Return ONLY JSON: {"policies": ["...", ...]}"""
 
 
+BATCH_IDEA_SYSTEM = """You are an analyst reading a batch of labelled cases: some POSITIVE (y=1) and some NEGATIVE (y=0).
+Find the dimensions (ideas) along which the positives differ from the negatives IN THIS BATCH.
+
+Good ideas:
+- are one coherent dimension that needs judgement to assess from a profile (e.g. "trajectory toward
+  increasingly selective employers", "depth of hands-on building experience"), not the mere presence
+  of a word, title or name
+- are grounded in this batch: say how the positives and negatives differ on it
+- are distinct from each other
+
+Return ONLY JSON:
+{"ideas": [{"idea": "short name", "rationale": "why it should predict the outcome", "evidence": "how positives and negatives in this batch differ on it"}, ...]}"""
+
+
+MERGE_SYSTEM = """You consolidate ideas proposed by several analysts. Each analyst read a different batch of labelled
+cases and proposed dimensions that distinguish positives from negatives.
+
+Merge ideas that describe the same dimension, keep the distinct ones, and return the requested number of ideas.
+Prefer ideas supported by several batches (more likely real than chance) and ideas that need judgement rather than
+keyword matching. Keep the set diverse.
+
+Return ONLY JSON:
+{"ideas": [{"idea": "short name", "rationale": "...", "evidence": "what the analysts saw", "support": number_of_batches}, ...]}"""
+
+
+def build_batch_prompt(task: str, batch: list[tuple[str, int]], batch_id: int, k: int) -> str:
+    pos = [t for t, y in batch if y == 1]
+    neg = [t for t, y in batch if y == 0]
+    return "\n".join([f"TASK: {task}", "", f"BATCH {batch_id}: {len(pos)} positive and {len(neg)} negative cases.", "",
+                      "=== POSITIVE CASES (y=1) ===", *[f"[P{i + 1}] {t}" for i, t in enumerate(pos)], "",
+                      "=== NEGATIVE CASES (y=0) ===", *[f"[N{i + 1}] {t}" for i, t in enumerate(neg)], "",
+                      f"Propose {k} ideas."])
+
+
+def build_merge_prompt(task: str, batch_ideas: list[list[dict[str, str]]], n: int) -> str:
+    lines = [f"TASK: {task}", ""]
+    for b, ideas in enumerate(batch_ideas):
+        lines.append(f"=== ANALYST {b + 1} ===")
+        lines += [f"- {i.get('idea')}: {i.get('rationale', '')} | evidence: {i.get('evidence', '')}" for i in ideas]
+        lines.append("")
+    lines.append(f"Return exactly {n} merged ideas.")
+    return "\n".join(lines)
+
+
 def _common_context(ctx: dict[str, Any]) -> list[str]:
     return [
         f"TASK: {ctx['task_description'] or '(no description given)'}",
@@ -154,9 +198,39 @@ class Brain:
         data = self._chat(POLICY_SYSTEM, build_policy_prompt(ctx, idea, k))
         return [str(p).strip() for p in data.get("policies", []) if str(p).strip()][:k]
 
-    def propose(self, ctx: dict[str, Any]) -> tuple[str, list[tuple[dict[str, str], str]]]:
-        """Both steps (ideas in parallel for step 2). Returns (thinking, [(idea, policy text), ...])."""
-        thinking, ideas = self.propose_ideas(ctx, self.cfg.ideas_per_iter)
+    def batch_ideas(self, task: str, batches: list[list[tuple[str, int]]]) -> tuple[str, list[dict[str, str]]]:
+        """Ideas read off labelled batches (in parallel), merged into `ideas_per_iter` distinct ideas."""
+        k = self.cfg.ideas_per_batch
+
+        def one(b: int) -> list[dict[str, str]]:
+            if self.mock:
+                return mock_ideas({"ngram_hints": "", "iteration": b}, k)[1]
+            try:
+                data = self._chat(BATCH_IDEA_SYSTEM, build_batch_prompt(task, batches[b], b + 1, k))
+                return [i for i in data.get("ideas", []) if isinstance(i, dict) and str(i.get("idea", "")).strip()][:k]
+            except Exception as e:  # noqa: BLE001 - a failed batch only loses its own ideas
+                print(f"  ! batch {b + 1} failed: {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=len(batches)) as pool:
+            per_batch = list(pool.map(one, range(len(batches))))
+        raw = sum(len(x) for x in per_batch)
+        if self.mock:
+            merged = [i for x in per_batch for i in x][: self.cfg.ideas_per_iter]
+        else:
+            data = self._chat(MERGE_SYSTEM, build_merge_prompt(task, per_batch, self.cfg.ideas_per_iter))
+            merged = [i for i in data.get("ideas", []) if isinstance(i, dict) and str(i.get("idea", "")).strip()]
+        self.last_batch_ideas = per_batch
+        return f"{len(batches)} batches -> {raw} ideas -> merged into {len(merged)}", merged[: self.cfg.ideas_per_iter]
+
+    def propose(self, ctx: dict[str, Any], batches: list[list[tuple[str, int]]] | None = None
+                ) -> tuple[str, list[tuple[dict[str, str], str]]]:
+        """Ideas (from the context, or from labelled batches), then policies for every idea in parallel.
+        Returns (thinking, [(idea, policy text), ...])."""
+        if batches is not None:
+            thinking, ideas = self.batch_ideas(ctx["task_description"], batches)
+        else:
+            thinking, ideas = self.propose_ideas(ctx, self.cfg.ideas_per_iter)
 
         def safe(idea: dict[str, str]) -> list[str]:
             try:

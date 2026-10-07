@@ -10,6 +10,11 @@ Each iteration:
   5. select    warm-started forward/backward selection on J over every policy evaluated so far
 Stops after `patience` iterations without objective gain, or after `iterations`.
 
+search.mode = oneshot skips the iteration: many ideas are proposed at once, policies are written for
+all of them in parallel (capped at `max_policies`), every policy is scored on every train row
+without screening, and selection runs once. With brain.idea_source = batches the ideas are read off
+labelled batches of explore rows (each positive in exactly one batch) and merged first.
+
 With eval.base = tfidf (default) a TF-IDF model is part of every regression, residual and
 example shown to the brain, so the search looks for what word statistics miss.
 """
@@ -228,9 +233,64 @@ class PolicySearch:
               f"objective={rec['objective']:.4f} (was {obj_before:.4f})", flush=True)
         return rec
 
+    # ------------------------------------------------------------ one-shot
+    def make_batches(self) -> list[list[tuple[str, int]]]:
+        """Balanced labelled batches of explore rows; positives are split so each appears once."""
+        b, d = self.cfg.brain, self.data
+        rng = np.random.default_rng(self.cfg.data.seed)
+        pos = rng.permutation(np.flatnonzero(d.explore_y == 1))
+        neg = rng.permutation(np.flatnonzero(d.explore_y == 0))
+        batches = []
+        for i in range(b.n_batches):
+            idx = list(pos[i * b.pos_per_batch:(i + 1) * b.pos_per_batch]) + \
+                  list(np.take(neg, range(i * b.neg_per_batch, (i + 1) * b.neg_per_batch), mode="wrap"))
+            rows = [(d.explore_text.iloc[j][: b.batch_chars], int(d.explore_y[j])) for j in idx]
+            rng.shuffle(rows)
+            batches.append(rows)
+        return batches
+
+    def oneshot(self) -> list[str]:
+        t0, ev, d, sc = time.time(), self.ev, self.data, self.cfg.search
+        batches = self.make_batches() if self.cfg.brain.idea_source == "batches" else None
+        thinking, proposals = self.brain.propose(self.context(1), batches)
+        if batches is not None:
+            (self.run_dir / "batch_ideas.json").write_text(json.dumps(
+                {"per_batch": self.brain.last_batch_ideas,
+                 "merged": list({i["idea"]: i for i, _ in proposals}.values())},
+                indent=2, ensure_ascii=False))
+        print(f"\n[oneshot] brain: {thinking[:600]}", flush=True)
+        cands = self.new_policies(proposals, 1)[: sc.max_policies]
+        for p in list(self.policies.values()):
+            if p not in cands:
+                del self.policies[p.name]
+        print(f"[oneshot] {len(proposals)} policies written, scoring {len(cands)} on all {len(d.train_y)} train rows",
+              flush=True)
+        full = self.jev.score(cands, d.train_text)
+        n_sel = len(d.select_y)
+        for p in cands:
+            ev.add(p.name, full[p.name].to_numpy(float)[:n_sel])
+            self.explore_frame[p.name] = full[p.name].to_numpy(float)[n_sel:]
+            self.pool.append(p.name)
+            p.stats["solo_perf"] = ev.perf([p.name])
+            p.stats["gain"] = ev.objective([p.name]) - ev.objective([])
+        self.selected = ev.select(self.pool, [], sc.max_features)
+        for p in cands:
+            p.status = "selected" if p.name in self.selected else "rejected"
+        rec = {"iteration": 1, "proposed": len(proposals), "promoted": [p.name for p in cands],
+               "selected": list(self.selected), "perf": ev.perf(self.selected),
+               "objective": ev.objective(self.selected), "redundancy": ev.redundancy(self.selected),
+               "objective_before": ev.objective([]), "seconds": round(time.time() - t0, 1), "brain_thinking": thinking}
+        self.history.append(rec)
+        print(f"  => selected {len(self.selected)} of {len(cands)}: {self.selected}\n"
+              f"  => perf={rec['perf']:.4f} objective={rec['objective']:.4f}", flush=True)
+        self.save()
+        return self.selected
+
     # ------------------------------------------------------------ run
     def run(self) -> list[str]:
         sc = self.cfg.search
+        if sc.mode == "oneshot":
+            return self.oneshot()
         best_obj, stale = self.ev.objective([]), 0
         for it in range(1, sc.iterations + 1):
             try:
