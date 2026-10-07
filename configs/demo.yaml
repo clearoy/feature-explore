@@ -1,0 +1,12 @@
+# Offline smoke test:  python -m featexp demo-data && python -m featexp run -c configs/demo.yaml --mock
+data:
+  path: data/demo.csv
+  text_col: text
+  target_col: y
+  task_description: Support tickets. y=1 means the ticket was escalated to a senior engineer.
+  max_dev_rows: 1200
+  max_test_rows: 300
+  explore_rows: 400
+  screen_rows: 250
+search:
+  iterations: 4

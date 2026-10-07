@@ -1,0 +1,51 @@
+# VCBench founder success: the configuration of the best run.
+# Discover on public (1000 explore rows for the brain, 3500 scored rows), evaluate once on private.
+data:
+  path: data/vcbench_final_public.csv
+  test_path: data/vcbench_final_private.csv
+  text_col: anonymised_prose
+  target_col: success
+  positive_label: 1
+  task_description: >-
+    Predict whether a startup founder will be successful, meaning their company raised over $500M
+    or exited or IPO'd at over $500M. Each text is an anonymised founder profile: the startup's industry,
+    the founder's education (degree, field, university QS rank) and professional experience
+    (roles, company sizes, industries, durations). Roughly 9% of founders are successes.
+  max_dev_rows: 4500
+  max_test_rows: 4500
+  explore_rows: 1000
+  screen_rows: 600
+  seed: 42
+
+brain:
+  model: deepseek-chat
+  temperature: 0.9
+  ideas_per_iter: 5
+  policies_per_idea: 3
+  n_examples: 14
+
+jev:
+  model: jev-latest
+  concurrency: 24
+  questions_per_request: 10
+  policy_template: >-
+    Investor heuristic (guidance, not a strict rule): {policy}
+    Considering this heuristic along with the founder's full profile, will this founder be successful?
+
+search:
+  iterations: 12
+  patience: 4
+  promote_per_iter: 5
+  min_screen_signal: 0.03
+  max_selected_corr: 0.9          # policies all ask "will this founder succeed?" and share a common component
+  max_pool_corr: 0.97
+  max_features: 15
+
+eval:
+  metric: roc_auc
+  folds: 5
+  repeats: 2
+  size_penalty: 0.002
+  redundancy_penalty: 0.005       # 0.03 stalls the search at one policy (baseline policy correlation ~0.5)
+  min_gain: 0.001
+  beta: 0.5
