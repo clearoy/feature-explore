@@ -40,7 +40,7 @@ class BrainConfig:
 
 @dataclass
 class JevConfig:
-    model: str = "jev-latest"
+    model: str = "jev-latest"          # an alias is pinned to the concrete version answering the first request
     concurrency: int = 24
     questions_per_request: int = 10
     timeout: float = 60.0
@@ -66,6 +66,10 @@ class SearchConfig:
 
 @dataclass
 class EvalConfig:
+    base: str = "none"                 # none: policies are scored on their own (best on VCBench)
+                                       # tfidf: policies are scored on top of a TF-IDF model; gains shrink to the
+                                       # noise level and selection does worse on the holdout (see README)
+    tfidf_Cs: list[float] = field(default_factory=lambda: [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0])
     metric: str = "roc_auc"            # roc_auc | average_precision (selection metric)
     folds: int = 5
     repeats: int = 2

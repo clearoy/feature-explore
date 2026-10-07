@@ -9,6 +9,9 @@ Each iteration:
   4. promote   the best `promote_per_iter` are scored on every train row
   5. select    warm-started forward/backward selection on J over every policy evaluated so far
 Stops after `patience` iterations without objective gain, or after `iterations`.
+
+With eval.base = tfidf (default) a TF-IDF model is part of every regression, residual and
+example shown to the brain, so the search looks for what word statistics miss.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from .config import Config
 from .data import Dataset, ngram_hints
 from .evaluator import Evaluator, make_model
 from .jev import JevScorer, Policy
+from .textmodel import logit, oof_proba, tfidf_model, tune_C
 
 
 def max_abs_corr(m: np.ndarray, t: np.ndarray) -> float:
@@ -40,7 +44,17 @@ def max_abs_corr(m: np.ndarray, t: np.ndarray) -> float:
 class PolicySearch:
     def __init__(self, cfg: Config, data: Dataset, jev: JevScorer, brain: Brain, run_dir: Path):
         self.cfg, self.data, self.jev, self.brain, self.run_dir = cfg, data, jev, brain, run_dir
-        self.ev = Evaluator(data.select_y, cfg.eval, seed=cfg.data.seed)
+        self.base_sel: np.ndarray | None = None      # TF-IDF logit: out-of-fold on select rows
+        self.base_explore: np.ndarray | None = None  # TF-IDF logit on explore rows (model fit on select rows)
+        self.tfidf_C: float | None = None
+        if cfg.eval.base == "tfidf":
+            self.tfidf_C, aucs = tune_C(data.select_text, data.select_y, cfg.eval.tfidf_Cs, cfg.data.seed)
+            print(f"tfidf base: C={self.tfidf_C} (CV AUC by C: "
+                  + ", ".join(f"{c}:{a:.4f}" for c, a in aucs.items()) + ")", flush=True)
+            self.base_sel = logit(oof_proba(data.select_text, data.select_y, self.tfidf_C, cfg.data.seed))
+            m = tfidf_model(self.tfidf_C).fit(data.select_text, data.select_y)
+            self.base_explore = logit(m.predict_proba(data.explore_text)[:, 1])
+        self.ev = Evaluator(data.select_y, cfg.eval, seed=cfg.data.seed, base=self.base_sel)
         self.explore_frame = pd.DataFrame(index=range(len(data.explore_y)))   # policy values on explore rows
         self.policies: dict[str, Policy] = {}
         self.pool: list[str] = []          # scored on every train row
@@ -49,15 +63,20 @@ class PolicySearch:
         self.baseline = self.ev.perf([])
         self.hints = ngram_hints(data.explore_text, data.explore_y)
         print(f"select={len(data.select_y)} explore={len(data.explore_y)} test={len(data.test_y)} "
-              f"positives={data.select_y.mean():.1%} metric={self.ev.metric} baseline={self.baseline:.4f}", flush=True)
+              f"positives={data.select_y.mean():.1%} metric={self.ev.metric} "
+              f"baseline ({'tfidf' if self.base_sel is not None else 'no features'})={self.baseline:.4f}", flush=True)
 
     # ------------------------------------------------------------ context for the brain
     def explore_predictions(self) -> np.ndarray:
-        """P(positive) on the explore rows from a model fit on the select rows."""
-        if not self.selected:
+        """P(positive) on the explore rows from a model (base + selected policies) fit on the select rows."""
+        X_sel = self.ev.frame[self.selected].to_numpy(float)
+        X_ex = self.explore_frame[self.selected].to_numpy(float)
+        if self.base_sel is not None:
+            X_sel = np.column_stack([self.base_sel, X_sel])
+            X_ex = np.column_stack([self.base_explore, X_ex])
+        if X_sel.shape[1] == 0:
             return np.full(len(self.data.explore_y), self.data.select_y.mean())
-        model = make_model().fit(self.ev.frame[self.selected].to_numpy(float), self.data.select_y)
-        return model.predict_proba(self.explore_frame[self.selected].to_numpy(float))[:, 1]
+        return make_model().fit(X_sel, self.data.select_y).predict_proba(X_ex)[:, 1]
 
     def context(self, iteration: int) -> dict[str, Any]:
         sel, ev, d = self.selected, self.ev, self.data
@@ -86,6 +105,12 @@ class PolicySearch:
             "residual_examples": "\n".join(show(i) for i in top),
             "random_examples": "\n".join(show(i) for i in rand),
             "history": [round(h["objective"], 4) for h in self.history],
+            "base_note": (
+                "All scores are measured ON TOP OF a TF-IDF word model (the baseline is TF-IDF alone), and the "
+                "residual examples are cases that TF-IDF plus the selected policies get wrong. A policy only helps "
+                "if it captures something word statistics miss: judgement, context, combinations, or reading "
+                "between the lines, not the presence of particular words, titles or names."
+                if self.base_sel is not None else ""),
         }
 
     @staticmethod

@@ -3,7 +3,12 @@
 A policy is one investor-style heuristic. Rendered into `jev.policy_template`, it becomes one
 yes/no question; Jev's P(yes) for a text is that policy's feature value. Several pending
 questions for the same text go into one request, answers are cached by
-(policy hash, text hash, model), and answers lost to errors get one more pass.
+(policy hash, text hash, Jev version), and answers lost to errors get one more pass.
+
+The Jev version is pinned: an alias such as `jev-latest` is resolved to the concrete version
+(e.g. `jev-1.13.0`) before the first lookup, every request names that version, and an answer
+from any other version is an error. A model trained on one version's scores is then never fed
+another version's scores, and `predict` reuses the version saved with the run.
 """
 
 from __future__ import annotations
@@ -17,6 +22,8 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+FULL_VERSION = re.compile(r"jev-\d+\.\d+\.\d+")
 
 import numpy as np
 import pandas as pd
@@ -87,20 +94,36 @@ def mock_answer(p: Policy, text: str) -> float:
     return float(1 / (1 + np.exp(-(2.5 * overlap - 1.5 + (noise - 0.5)))))
 
 
+class VersionMismatch(RuntimeError):
+    pass
+
+
 class JevScorer:
     def __init__(self, cfg: JevConfig, cache_path: str | Path, mock: bool = False):
         self.cfg = cfg
         self.cache = JevCache(cache_path)
         self.mock = mock
-        self.model_tag = "mock" if mock else cfg.model
+        self.version: str | None = "mock" if mock else (cfg.model if FULL_VERSION.fullmatch(cfg.model) else None)
         self.requests = self.input_tokens = self.output_tokens = self.failures = 0
+
+    def resolve_version(self) -> str:
+        """Pin an alias to the concrete Jev version with one tiny request."""
+        if self.version is None:
+            from typesafe_sdk import Noul, TypeSafeClient
+
+            with TypeSafeClient(model=self.cfg.model, timeout=self.cfg.timeout) as client:
+                resp = client.system_one(state="ping", questions={"q": Noul(instructions="Is this text non-empty?")})
+            self.version = resp.model
+            print(f"    jev: {self.cfg.model} pinned to {self.version}", flush=True)
+        return self.version
 
     def score(self, policies: list[Policy], texts: pd.Series) -> pd.DataFrame:
         """P(yes) for every (text, policy), as a DataFrame aligned to texts.index with one column per policy."""
         if not policies:
             return pd.DataFrame(index=texts.index)
+        version = self.resolve_version()
         hashes = [text_hash(t) for t in texts]
-        cached = {p.name: self.cache.get_many(p.key(), list(set(hashes)), self.model_tag) for p in policies}
+        cached = {p.name: self.cache.get_many(p.key(), list(set(hashes)), version) for p in policies}
 
         pending: dict[str, tuple[str, list[Policy]]] = {}
         for th, t in zip(hashes, texts):
@@ -130,7 +153,7 @@ class JevScorer:
 
         def record(th: str, p: Policy, v: float) -> None:
             results[(p.name, th)] = v
-            buffer.append((p.key(), th, self.model_tag, v))
+            buffer.append((p.key(), th, self.version, v))
 
         def progress() -> None:
             nonlocal done
@@ -151,12 +174,14 @@ class JevScorer:
 
             sem = asyncio.Semaphore(self.cfg.concurrency)
             retry = RetryPolicy(max_retries=self.cfg.max_retries, timeout=self.cfg.timeout)
-            async with AsyncTypeSafeClient(model=self.cfg.model, retry=retry, timeout=self.cfg.timeout) as client:
+            async with AsyncTypeSafeClient(model=self.version, retry=retry, timeout=self.cfg.timeout) as client:
                 async def worker(th: str, t: str, ps: list[Policy]) -> None:
                     questions = {f"q{i}": Noul(instructions=p.question) for i, p in enumerate(ps)}
                     try:
                         async with sem:
                             resp = await client.system_one(state=t, questions=questions)
+                        if resp.model != self.version:
+                            raise VersionMismatch(f"Jev answered with {resp.model}, pinned {self.version}")
                         self.requests += 1
                         self.input_tokens += resp.usage.input_tokens or 0
                         self.output_tokens += resp.usage.output_tokens or 0
@@ -164,6 +189,8 @@ class JevScorer:
                             ans = resp.answers.get(f"q{i}")
                             if ans is not None:
                                 record(th, p, float(ans.noul))
+                    except VersionMismatch:
+                        raise
                     except Exception as e:  # noqa: BLE001 - one bad request must not kill the run
                         self.failures += 1
                         if self.failures <= 5:

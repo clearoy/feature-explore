@@ -1,9 +1,11 @@
 """Out-of-sample scoring of policy sets and penalized selection (on the select rows only).
 
-    J(F) = Perf_CV(F) - size_penalty * |F| - redundancy_penalty * mean_{f != g in F} |corr(f, g)|
+    J(F) = Perf_CV(base + F) - size_penalty * |F| - redundancy_penalty * mean_{f != g in F} |corr(f, g)|
 
 Perf_CV is the metric of out-of-fold predictions of a logistic regression, averaged over
 repeated stratified K-fold with fixed splits, so every set is compared on the same folds.
+`base` (the TF-IDF model's out-of-fold logit) is always in the regression, so a policy only
+counts for what it adds on top of word statistics, which is how it is used in the final model.
 """
 
 from __future__ import annotations
@@ -32,8 +34,9 @@ def score(metric: str, y: np.ndarray, p: np.ndarray) -> float:
 
 
 class Evaluator:
-    def __init__(self, y: np.ndarray, cfg: EvalConfig, seed: int = 0):
+    def __init__(self, y: np.ndarray, cfg: EvalConfig, seed: int = 0, base: np.ndarray | None = None):
         self.y = y
+        self.base = None if base is None else np.asarray(base, dtype=float).reshape(-1, 1)
         self.cfg = cfg
         self.metric = cfg.metric
         self.frame = pd.DataFrame(index=range(len(y)))   # one column per evaluated policy
@@ -52,11 +55,13 @@ class Evaluator:
         if key in self._cache:
             return self._cache[key]
         X = self.frame[list(key)].to_numpy(float)
+        if self.base is not None:
+            X = np.hstack([self.base, X])
         scores, first = [], None
         for splits in self.splits:
             pred = np.zeros(len(self.y))
             for tr, te in splits:
-                pred[te] = (self.y[tr].mean() if not key
+                pred[te] = (self.y[tr].mean() if X.shape[1] == 0
                             else make_model().fit(X[tr], self.y[tr]).predict_proba(X[te])[:, 1])
             scores.append(score(self.metric, self.y, pred))
             first = pred if first is None else first

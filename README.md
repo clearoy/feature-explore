@@ -13,20 +13,35 @@ This is the best-performing approach from a series of experiments (direct featur
 
 ## Results on VCBench
 
-Founder success prediction: 4,500 public rows for discovery and 4,500 private rows used once as the holdout, with 9% positives. Mean ± sd over three seeds, holdout, in %:
+Founder success prediction: 4,500 public rows for discovery and 4,500 private rows used once as the holdout, with 9% positives. Default configuration, mean ± sd over three seeds (42, 1, 2), holdout, in %:
 
 | model | features | AUC | AP | F0.5 |
 |---|---|---|---|---|
-| TF-IDF alone | ~50k n-grams | 73.7 | 28.7 | 32.5 ± 1.1 |
+| TF-IDF alone (C tuned by CV) | ~8k n-grams | 74.2 | 29.4 | 34.5 ± 0.8 |
 | Selected policies alone | 1–8 policies | 71.6 ± 0.4 | 24.7 ± 1.5 | 28.3 ± 0.9 |
-| **Average of TF-IDF and policies** | | **75.2 ± 0.2** | **31.2 ± 0.7** | **34.9 ± 0.6** |
-| Stack: TF-IDF + policies | | 75.0 ± 0.2 | 31.0 ± 0.7 | 34.3 ± 1.2 |
+| Average of TF-IDF and policies | | 75.0 ± 0.3 | 31.1 ± 0.8 | 34.7 ± 0.7 |
+| **Stack: TF-IDF + policies** | | **75.1 ± 0.2** | **31.6 ± 0.6** | **34.9 ± 0.8** |
 | Reference: Jev + 201 policies (policy-induction) | 201 policies | 74.2 | – | 36.7 |
 
-- The gain from adding policies to TF-IDF is consistent across seeds: about +1.5 AUC and +2.5 AP.
-- The best single run reached stack AUC 75.7, AP 33.1 and F0.5 36.4, but that was a favourable draw. Use the means above.
+- Adding policies to TF-IDF helps on every seed: about +0.9 AUC and +2.2 AP.
 - The number of selected policies varies a lot between seeds (1, 6 and 8), yet the combined result barely changes. Each policy feature carries Jev's holistic judgement of the whole profile, and that shared component is most of what TF-IDF lacks.
+- The policy that recurs most across runs is about **the selectivity and prestige of past employers** (elite consulting, investment banking, top technology firms).
 - F0.5 depends on a threshold fitted on training predictions and moves by a few points between runs. AUC and AP are the steadier comparison.
+- DeepSeek samples at temperature 0.9, so a new run finds different policies and lands somewhere in these ranges. The best single run so far reached stack AUC 75.7 and AP 33.1, but that was a favourable draw.
+
+### What was tried (same three seeds, holdout stack, %)
+
+| change | AUC | AP | F0.5 | verdict |
+|---|---|---|---|---|
+| Original: policies scored on their own, TF-IDF C = 4 | 75.0 ± 0.2 | 31.0 ± 0.7 | 34.3 ± 1.2 | |
+| **+ TF-IDF C tuned by CV (C = 1)** | **75.1 ± 0.2** | **31.6 ± 0.6** | **34.9 ± 0.8** | kept, now the default |
+| + policies scored on top of TF-IDF during selection (`eval.base: tfidf`) | 74.8 ± 0.3 | 30.8 ± 0.5 | 33.5 ± 1.1 | worse; optional, off by default |
+
+Scoring policies on top of TF-IDF matches how they are used in the end, but it did worse:
+- Each policy's gain shrinks to a few thousandths of AUC, the same size as cross-validation noise, so selection starts picking noise.
+- It also underrates the policies whose holistic judgement looks redundant with TF-IDF on the training rows, which are exactly the ones that help on the holdout.
+
+The row with tuned C reuses the three original searches and refits only the final models (the Jev answers were cached). The default configuration produces that row.
 
 ## Quick start
 
@@ -97,8 +112,8 @@ each iteration (up to 12):
              J = AUC_CV − 0.002·|F| − 0.005·mean|corr|   (5-fold × 2 repeats, select rows only)
  stop when J has not improved for 4 iterations, or after 12
 
-final: train TF-IDF, a policy model, their average and their stack on all training rows.
-       Thresholds come from out-of-fold predictions. The holdout is scored once.
+final: train TF-IDF (C chosen by CV AUC), a policy model, their average and their stack on all
+       training rows. Thresholds come from out-of-fold predictions. The holdout is scored once.
 ```
 
 ## Outputs (`runs/<name>/`)
@@ -112,7 +127,9 @@ final: train TF-IDF, a policy model, their average and their stack on all traini
 | `holdout_predictions.csv` | holdout probabilities of all four models |
 | `run.log` | full log when started through `scripts/run_vcbench.sh` |
 
-Jev answers are cached in `.cache/jev.sqlite`, keyed by (policy, text, model), so a rerun never pays twice for the same answer. Runs started in parallel can share the cache.
+Jev answers are cached in `.cache/jev.sqlite`, keyed by (policy, text, Jev version), so a rerun never pays twice for the same answer. Runs started in parallel can share the cache.
+
+**The Jev version is pinned.** An alias such as `jev-latest` is resolved to the concrete version (for example `jev-1.13.0`) before the first request. Every request then names that version, and an answer from any other version stops the run. The version is saved in `model.joblib`, and `predict` scores new texts with it, so a trained model is never fed scores from a different Jev.
 
 ## Key parameters
 
@@ -126,9 +143,12 @@ Jev answers are cached in `.cache/jev.sqlite`, keyed by (policy, text, model), s
 | `search.max_selected_corr` | 0.9 | candidates correlating more than this with a selected policy are dropped at screening |
 | `data.explore_rows` | 1000 | rows only the brain sees; they are never scored, which prevents leakage |
 | `data.seed` / `--seed` | 42 | explore/select split, screening sample, CV folds |
+| `eval.base` | none | `tfidf` scores policies on top of TF-IDF during selection (did worse, see above) |
+| `eval.tfidf_Cs` | 0.5 … 32 | candidate regularization strengths for the TF-IDF model, chosen by CV AUC |
+| `jev.model` | jev-latest | an alias is pinned to the concrete version on first use; pass a full version to fix it |
 | `jev.policy_template` | generic | change it to fit your task |
 
-**Cost on VCBench with the default config:** about 35k–115k Jev requests per run (fewer when the search stops early) and about 200k DeepSeek tokens.
+**Cost on VCBench with the default config:** about 35k–115k Jev requests per run (fewer when the search stops early) and about 200k DeepSeek tokens. Three seeds in parallel with `--concurrency 12` take about two hours.
 
 ## Reading the weights
 
@@ -142,10 +162,11 @@ If you need weights that read literally, change the template so Jev only asks wh
 featexp/
   config.py     configuration (defaults = the best VCBench settings)
   data.py       loading; explore / select / holdout split; n-gram hints
-  jev.py        Policy; batched Jev scoring + SQLite cache + retry pass + mock
+  jev.py        Policy; batched Jev scoring + version pinning + SQLite cache + retry pass + mock
   brain.py      the two DeepSeek prompts (ideas, policies) + mock
   evaluator.py  repeated K-fold CV, objective J, forward/backward selection
   search.py     the iteration loop: ideas → policies → screen → promote → select
+  textmodel.py  the TF-IDF model, C tuning, out-of-fold predictions
   final.py      final models (TF-IDF, policies, average, stack), holdout evaluation, report
   cli.py        run / predict / check / demo-data
 configs/

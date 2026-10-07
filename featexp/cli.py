@@ -61,6 +61,7 @@ def cmd_predict(args: argparse.Namespace) -> None:
     run_dir = Path(args.run)
     cfg = load_config(None, json.loads((run_dir / "state.json").read_text())["config"])
     bundle = joblib.load(run_dir / "model.joblib")
+    cfg.jev.model = bundle.get("jev_model") or cfg.jev.model   # score with the Jev version the model was trained on
     policies = [Policy.from_dict(d) for d in json.loads((run_dir / "policies.json").read_text())["policies"]]
     df = load_table(args.input)
     texts = df[args.text_col or cfg.data.text_col].astype(str).str.slice(0, cfg.data.max_chars).reset_index(drop=True)
@@ -69,10 +70,11 @@ def cmd_predict(args: argparse.Namespace) -> None:
     out = pd.concat([df.reset_index(drop=True), X], axis=1)
     for m, p in probs.items():
         out[f"p_{m}"] = p
-    out["predicted"] = (probs["stack"] >= bundle["thresholds"]["stack"]).astype(int)
+    best = "stack" if "stack" in probs else "tfidf"
+    out["predicted"] = (probs[best] >= bundle["thresholds"][best]).astype(int)
     out.to_csv(args.output, index=False)
-    print(f"wrote {len(out)} rows to {args.output} (p_stack = recommended score; predicted uses its "
-          f"F{bundle['beta']} threshold {bundle['thresholds']['stack']:.3f})")
+    print(f"wrote {len(out)} rows to {args.output} (p_{best} = recommended score; predicted uses its "
+          f"F{bundle['beta']} threshold {bundle['thresholds'][best]:.3f})")
 
 
 def cmd_check(_: argparse.Namespace) -> None:

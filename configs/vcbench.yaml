@@ -42,6 +42,8 @@ search:
   max_features: 15
 
 eval:
+  base: none                      # score policies on their own; "tfidf" (on top of TF-IDF) did worse on the holdout
+  tfidf_Cs: [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]   # final TF-IDF C chosen by CV AUC (VCBench: 1.0)
   metric: roc_auc
   folds: 5
   repeats: 2

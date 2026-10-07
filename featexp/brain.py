@@ -54,6 +54,7 @@ def _common_context(ctx: dict[str, Any]) -> list[str]:
         f"TASK: {ctx['task_description'] or '(no description given)'}",
         f"Target type: binary; metric: {ctx['metric']} (higher is better). "
         f"Baseline {ctx['baseline']:.4f}; current selected set {ctx['current_perf']:.4f}; objective J {ctx['current_obj']:.4f}.",
+        *([ctx["base_note"]] if ctx.get("base_note") else []),
         "",
         "CURRENTLY SELECTED FEATURES (delta_perf = drop in OOS metric when removed):",
         ctx["selected_table"] or "  (none yet)",
